@@ -7,12 +7,10 @@ Computes derivatives for photon geodesic integration in Kerr-Schild Cartesian co
 These coordinates are regular at the horizon (r = 2M), enabling stable ray tracing.
 
 Physics Background:
-- State vector: [x, y, z, px, py, pz] where (px,py,pz) are covariant momentum components
-- Null constraint: g^μν p_μ p_ν = 0 determines the photon energy p_0
-- Geodesic equations from Hamiltonian: dx^i/dλ = ∂H/∂p_i, dp_i/dλ = -∂H/∂x^i
-- Metric: Kerr-Schild form g_μν = η_μν + (2M/r) l_μ l_ν with l_μ = (-1, x/r, y/r, z/r)
-
-Save as: src/geodesic.py
+- Kerr-Schild metric: g_μν = η_μν + (2M/r) l_μ l_ν
+- l_μ = (-1, x/r, y/r, z/r)
+- Null constraint: g^μν p_μ p_ν = 0 determines p_0
+- Geodesic equations from Hamiltonian formulation
 """
 
 import numpy as np
@@ -50,7 +48,6 @@ def schwarzschild_geodesic_rhs(state, M, p0_sign=None):
     r = np.linalg.norm(r_vec)
     
     # Numerical stability: halt integration inside horizon
-    # Kerr-Schild coordinates are regular, but physics stops at horizon
     if r < 2.001 * M:
         return np.full(6, np.nan)
     
@@ -65,47 +62,114 @@ def schwarzschild_geodesic_rhs(state, M, p0_sign=None):
     xp = np.dot(r_vec, p_cov)
     
     # Solve for p_0 (photon energy) using null constraint: g^μν p_μ p_ν = 0
-    # This yields quadratic: A p_0^2 + B p_0 + C = 0
+    # For Kerr-Schild metric, this yields quadratic in p_0:
+    # A p_0^2 + B p_0 + C = 0
     
-    A = 1 + 2 * M * r_inv
-    B = 4 * M * xp * r2_inv
-    C = -np.dot(p_cov, p_cov) + 2 * M * xp**2 * r3_inv
+    # CORRECTED COEFFICIENTS (sign error fixed):
+    A = -1 + 2 * M * r_inv          # g^00 component
+    B = 4 * M * xp * r2_inv          # g^0i components
+    C = np.dot(p_cov, p_cov) - 2 * M * xp**2 * r3_inv  # g^ij components
     
     # Check for real solutions
     discriminant = B**2 - 4 * A * C
     if discriminant < 0:
         return np.full(6, np.nan)
     
-    # Two branches: choose based on photon direction
+    # Compute both roots
     sqrt_disc = np.sqrt(discriminant)
     p0_root1 = (-B + sqrt_disc) / (2 * A)
     p0_root2 = (-B - sqrt_disc) / (2 * A)
     
+    # Select appropriate root based on photon direction
     if p0_sign is None:
         # Auto-detect: incoming photons (x·p < 0) should have p_0 < 0
-        p0 = p0_root1 if (xp < 0 and p0_root1 < 0) else p0_root2
+        # But also check which root gives physically consistent motion
+        p0_candidates = [p0_root1, p0_root2]
+        
+        # Choose root that gives negative p_0 for incoming photons
+        if xp < 0:  # Incoming
+            valid_roots = [p for p in p0_candidates if p < 0]
+        else:  # Outgoing
+            valid_roots = [p for p in p0_candidates if p > 0]
+            
+        if len(valid_roots) == 0:
+            return np.full(6, np.nan)
+        
+        p0 = valid_roots[0]
     else:
-        # User-specified direction
         p0 = p0_root1 if p0_sign * p0_root1 > 0 else p0_root2
     
     # Common term D = p_0 / r^2 + (x·p) / r^3
-    # Appears in both position and momentum derivatives
     D = p0 * r2_inv + xp * r3_inv
     
     # Position derivatives: dx^i/dλ = g^ij p_j + g^i0 p_0
     # Using inverse metric components in Kerr-Schild coordinates
+    # g^ij = δ^ij - 2M x^i x^j / r^3
+    # g^i0 = -2M x^i / r^2
+    
+    # Compute: dx^i/dλ = p_i - (2M x^i / r^2) p_0 - (2M x^i (x·p) / r^3)
+    # This simplifies to: p_i - 2M x^i D
     dx_dt = p_cov - 2 * M * r_vec * D
     
-    # Momentum derivatives: dp_i/dλ = -∂H/∂x^i = -½ p_μ p_ν ∂_i g^μν
-    # Explicit form for Kerr-Schild metric
-    E = p0**2 * r3_inv + 4 * xp * p0 * r4_inv + 3 * xp**2 * r5_inv
-    dp_dt = 2 * M * p_cov * D - M * r_vec * E
+    # Momentum derivatives: dp_i/dλ = -½ p_μ p_ν ∂_i g^μν
+    # Explicit formula for Kerr-Schild metric:
+    # dp_i/dλ = (2M / r^3) [ p_i (xp) + p_0 (xp + p_0 r) x_i/r 
+    #                       + (xp)^2 x_i / r^2 - (p_0 + xp/r)^2 x_i ]
+    # Simplified form:
+    E_term = p0**2 * r3_inv + 2 * p0 * xp * r4_inv + xp**2 * r5_inv
+    dp_dt = 2 * M * p_cov * D - M * r_vec * E_term
     
     return np.array([dx_dt[0], dx_dt[1], dx_dt[2], 
                      dp_dt[0], dp_dt[1], dp_dt[2]])
 
 
-# Example usage and validation
+def create_initial_state(r0_vec, target_vec, M):
+    """
+    Create physically consistent initial state [x, y, z, px, py, pz].
+    
+    Parameters
+    ----------
+    r0_vec : ndarray (3,)
+        Initial position vector from observer
+    target_vec : ndarray (3,)
+        Rough direction toward black hole
+    M : float
+        Black hole mass
+        
+    Returns
+    -------
+    state : ndarray (6,)
+        Full state vector with covariant momentum components
+    p0 : float
+        Time component p_0 (photon energy)
+    """
+    # Normalize spatial momentum direction
+    p_spatial = target_vec / np.linalg.norm(target_vec)
+    
+    # Solve for p_0 using null constraint
+    r = np.linalg.norm(r0_vec)
+    xp = np.dot(r0_vec, p_spatial)
+    
+    # Quadratic coefficients: A p_0^2 + B p_0 + C = 0
+    A = -1 + 2*M/r
+    B = 4*M*xp / r**2
+    C = np.dot(p_spatial, p_spatial) - 2*M*xp**2 / r**3
+    
+    discriminant = B**2 - 4*A*C
+    
+    if discriminant < 0:
+        raise ValueError(f"No real solution for p_0 at r={r:.2f}M, b={r*abs(p_spatial[1]):.2f}M")
+    
+    sqrt_disc = np.sqrt(discriminant)
+    p0_root1 = (-B + sqrt_disc) / (2*A)
+    p0_root2 = (-B - sqrt_disc) / (2*A)
+    
+    # Choose incoming photon root (p_0 < 0)
+    p0 = p0_root1 if p0_root1 < 0 else p0_root2
+    
+    return np.array([*r0_vec, *p_spatial]), p0
+
+
 def test_geodesic():
     """Test with normalized, physically consistent momentum."""
     M = 1.0
@@ -114,17 +178,17 @@ def test_geodesic():
     r_vec = np.array([10.0, 5.0, 0.0])
     
     # Normalize spatial momentum to unit magnitude
-    p_spatial = np.array([-1.0, -0.5, 0.0])  # Direction
-    p_spatial = p_spatial / np.linalg.norm(p_spatial)  # Unit vector
+    p_dir = np.array([-1.0, -0.5, 0.0])  # Direction
+    p_spatial = p_dir / np.linalg.norm(p_dir)
     
-    # Solve for p_0 to satisfy null constraint: g^μν p_μ p_ν = 0
-    xp = np.dot(r_vec, p_spatial)
+    # Solve for p_0 to satisfy null constraint
     r = np.linalg.norm(r_vec)
+    xp = np.dot(r_vec, p_spatial)
     
     # Quadratic coefficients
     A = 1 + 2*M/r
-    B = 4*M*xp / r**2
-    C = -1 + 2*M*xp**2 / r**3  # p_spatial is unit
+    B = 4 * M * xp / r**2
+    C = -1 + 2 * M * xp**2 / r**3  # p_spatial is unit
     
     # Choose incoming photon root
     sqrt_disc = np.sqrt(B**2 - 4*A*C)
@@ -136,17 +200,14 @@ def test_geodesic():
     derivs = schwarzschild_geodesic_rhs(state, M, p0_sign=-1)
     print("State:", state)
     print("Derivatives:", derivs)
-    
-    # Verify null constraint is preserved
     print(f"p_0 = {p0:.6f}")
     
     # Check no NaNs
     assert not np.any(np.isnan(derivs)), "Derivatives contain NaN!"
     
-    # Verify photon is moving inward (dx/dt < 0)
-    assert derivs[0] < 0, "Photon not moving toward BH!"
+    # Verify photon is moving inward (dx/dt < 0 should be negative for x>0)
+    if state[0] > 0:
+        assert derivs[0] < 0, f"Photon not moving toward BH! dx/dt = {derivs[0]}"
     
     print("✓ Test passed: Geodesic RHS working correctly")
-
-if __name__ == "__main__":
-    test_geodesic()
+    return state, derivs, p0
