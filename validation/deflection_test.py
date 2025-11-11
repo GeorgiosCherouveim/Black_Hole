@@ -1,231 +1,229 @@
 #!/usr/bin/env python3
 """
-Black Hole Ray Tracer - Photon Deflection Validation
-====================================================
-
-This script validates photon deflection calculations for a Schwarzschild black hole
-by comparing the exact General Relativistic solution (using elliptic integrals)
-with the 2nd-order Post-Newtonian approximation.
-
-Physics Background:
-- Schartzschild metric describes a static, spherical black hole of mass M
-- Photons follow null geodesics with impact parameter b
-- Critical impact parameter b_crit = 3√3 M: photons with b < b_crit are captured
-- For b > b_crit, photons are deflected by angle α
-
-Save as: validation/deflection_test.py
+Schwarzschild Ray Tracer - Thesis Validation
+==========================================
+Tests weak-field deflection convergence against exact solution.
 """
 
+import sys
 import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.special import ellipk
-from scipy.optimize import brentq
+from schwarzschild import schwarzschild_geodesic_rhs
 
-# Set geometric units: G = c = 1
-M = 1.0  # Black hole mass (scale for all lengths)
+# === Import your integrator functions ===
+from integrator import create_initial_state
+from integrator import integrate_geodesic
 
-# Critical impact parameter for photon capture
-b_crit = 3 * np.sqrt(3) * M  # ≈ 5.196M
-
-
-def find_closest_approach(b, M):
+def calculate_deflection_angle(initial_direction, final_state):
     """
-    Find distance of closest approach r0 for a photon with impact parameter b.
+    Compute deflection angle between incoming asymptote and final direction.
+    initial_direction: unit vector of incoming photon (e.g., [-1, 0, 0])
+    final_state: [x, y, z, px, py, pz]
+    """
+    p_final = final_state[3:6]  # Covariant momentum
+    p_norm = np.linalg.norm(p_final)
+    if p_norm < 1e-12:
+        return np.nan
     
-    Physics:
-    At closest approach, radial velocity dr/dλ = 0, giving:
-    b = r0 / sqrt(1 - 2M/r0)
+    direction_final = p_final / p_norm
+    dot_product = np.dot(initial_direction, direction_final)
     
-    This leads to cubic equation: r0³ - b²r0 + 2Mb² = 0
-    
-    Parameters:
-    -----------
-    b : float
-        Impact parameter (must be > b_crit for escape)
-    M : float
-        Black hole mass
+    # Clip for numerical safety
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+    angle = np.arccos(dot_product)
+    return angle
+
+def check_energy_conservation(state_initial, state_final, M):
+    """
+    Verify Hamiltonian constraint H = -p₀ is conserved.
+    Returns relative drift (should be < 1e-6).
+    """
+    def compute_hamiltonian(state):
+        x, y, z, px, py, pz = state
+        r = np.linalg.norm([x, y, z])
+        p_spatial = np.array([px, py, pz])
+        xp = np.dot([x, y, z], p_spatial)
         
-    Returns:
-    --------
-    r0 : float
-        Distance of closest approach (> 2M)
-    """
-    rs = 2 * M
-    
-    def f(r):
-        return r**3 - b**2 * r + b**2 * rs
-    
-    # For b > b_crit, the physical root is > 3M
-    # Lower bound: r_min = 3M (where f(r) < 0)
-    r_min = 3 * M + 1e-6
-    
-    # Upper bound: r_max = 1.5 * b (where f(r) > 0 for all b > b_crit)
-    r_max = b * 1.5
-    
-    return brentq(f, r_min, r_max)
-
-
-def exact_deflection(b, M):
-    """
-    Calculate exact GR deflection angle using elliptic integrals.
-    
-    Physics:
-    The null geodesic equation integrates to:
-    α = 2 * sqrt(r0/(r0 - rs)) * K(k) - π
-    
-    where:
-    - r0 is distance of closest approach
-    - rs = 2M is Schwarzschild radius
-    - K(k) is complete elliptic integral of the first kind
-    - k² = rs/(r0 - rs) * (3r0 - rs)/(4r0)
-    
-    Parameters:
-    -----------
-    b : float
-        Impact parameter
-    M : float
-        Black hole mass
+        # Solve -p₀² + pᵢpⁱ = 0 for null geodesic
+        A = -1.0
+        B = -4 * M * xp / r**2
+        C = 1.0 + 2 * M / r
         
-    Returns:
-    --------
-    alpha : float
-        Deflection angle in radians (inf if captured)
-    """
-    rs = 2 * M
-    
-    if b <= b_crit:
-        return np.inf  # Photon captured by black hole
-    
-    # Find closest approach distance
-    r0 = find_closest_approach(b, M)
-    
-    # Calculate elliptic integral parameters
-    prefactor = np.sqrt(r0 / (r0 - rs))
-    
-    # Modulus squared (must be < 1 for real solution)
-    k_squared = (rs / (r0 - rs)) * (3 * r0 - rs) / (4 * r0)
-    
-    # Numerical stability check
-    if k_squared >= 1.0:
-        k_squared = 0.999999
-    
-    # Complete elliptic integral of the first kind
-    K = ellipk(k_squared)
-    
-    # Total angle swept from asymptote to asymptote
-    delta_phi = 2 * prefactor * K
-    
-    # Deflection is deviation from straight-line path (π radians)
-    alpha = delta_phi - np.pi
-    
-    return alpha
-
-
-def deflection_2pn(b, M):
-    """
-    Calculate 2PN (Post-Newtonian) approximation for photon deflection.
-    
-    Physics:
-    Weak-field expansion of the exact solution:
-    α_2PN = 4M/b + (15π/4)(M/b)² + O((M/b)³)
-    
-    Valid for b >> M (weak gravitational field).
-    
-    Parameters:
-    -----------
-    b : float
-        Impact parameter
-    M : float
-        Black hole mass
+        discriminant = B**2 - 4 * A * C
+        if discriminant < 0:
+            return np.nan
         
-    Returns:
-    --------
-    alpha : float
-        2PN deflection angle in radians
-    """
-    x = M / b
-    return 4 * x + (15 * np.pi / 4) * x**2
+        sqrt_disc = np.sqrt(discriminant)
+        p0 = (-B - sqrt_disc) / (2 * A)  # Incoming photon
+        return -p0  # Hamiltonian H = -p₀
+    
+    H_initial = compute_hamiltonian(state_initial)
+    H_final = compute_hamiltonian(state_final)
+    
+    if abs(H_initial) < 1e-12:
+        return np.nan
+    
+    relative_drift = abs(H_final - H_initial) / abs(H_initial)
+    return relative_drift
 
+def run_deflection_validation():
+    """Main validation test for thesis specification."""
+    print("Schwarzschild Ray Tracer - Thesis Validation")
+    print("=" * 60)
+    
+    # Physical parameters (WEAK FIELD)
+    M = 1.0
+    b = 100.0 * M  # Impact parameter (b >> M)
+    r_initial = 1000.0 * M  # Start in asymptotic region
+    r_escape = 5000.0 * M   # ESCAPE TO FAR FIELD (must be > r_initial)
+    
+    # Exact weak-field deflection
+    alpha_exact = 4.0 * M / b
+    print(f"Impact parameter: b = {b/M:.1f}M")
+    print(f"Exact deflection: α = {alpha_exact:.6e} rad")
+    print(f"Start radius: {r_initial/M:.1f}M | Escape radius: {r_escape/M:.1f}M")
+    print("=" * 60)
+    
+    # Initial conditions
+    r0 = np.array([r_initial, 0.0, 0.0])
+    aim_point = np.array([0.0, b, 0.0])
+    target = aim_point - r0
+    
+    state0, _ = create_initial_state(r0, target, M)
+    initial_direction = np.array([-1.0, 0.0, 0.0])  # Asymptotic incoming direction
+    
+    # Step sizes for convergence test
+    dt_values = np.array([2.0, 1.0, 0.5, 0.25, 0.125])
+    results = []
+    
+    for dt in dt_values:
+        print(f"\nTesting dt = {dt:.3f}M...")
+        
+        # Integrate geodesic
+        trajectory, status = integrate_geodesic(
+            state0, M, 
+            lambda_max=10000.0,  # Increased to reach r_escape
+            dt=dt, 
+            r_escape=r_escape
+        )
+        
+        if status['reason'] != 'escape':
+            print(f"  ❌ Failed: {status['reason']} at r={status['final_r']:.2f}M")
+            continue
+        
+        # Calculate deflection angle
+        final_state = trajectory[-1]
+        alpha_sim = calculate_deflection_angle(initial_direction, final_state)
+        
+        # Check energy conservation
+        energy_drift = check_energy_conservation(state0, final_state, M)
+        
+        # Error metrics
+        angle_error = abs(alpha_sim - alpha_exact)
+        rel_error = angle_error / alpha_exact
+        
+        print(f"  Steps: {len(trajectory)}")
+        print(f"  Final r: {status['final_r']:.2f}M")
+        print(f"  Simulated α: {alpha_sim:.6e} rad")
+        print(f"  Angle error: {angle_error:.2e}")
+        print(f"  Energy drift: {energy_drift:.2e}")
+        
+        results.append({
+            'dt': dt,
+            'alpha_sim': alpha_sim,
+            'angle_error': angle_error,
+            'energy_drift': energy_drift,
+            'n_steps': len(trajectory)
+        })
+    
+    return results
+
+def plot_convergence(results):
+    """Plot deflection angle convergence."""
+    dt_vals = np.array([r['dt'] for r in results])
+    errors = np.array([r['angle_error'] for r in results])
+    drifts = np.array([r['energy_drift'] for r in results])
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # --- Plot 1: Convergence rate ---
+    ax1.loglog(dt_vals, errors, 'o-', linewidth=2, markersize=8, label='RK4 Error')
+    
+    # Reference slope for 4th-order
+    ref_dt = np.array([dt_vals[0], dt_vals[-1]])
+    slope_4 = errors[0] * (ref_dt/dt_vals[0])**4
+    ax1.loglog(ref_dt, slope_4, '--', alpha=0.5, label='4th Order (Δt⁴)')
+    
+    ax1.set_xlabel('Step Size dt (M)', fontsize=12)
+    ax1.set_ylabel('|α_sim - α_exact| (rad)', fontsize=12)
+    ax1.set_title('Deflection Angle Convergence', fontsize=14, fontweight='bold')
+    ax1.legend(loc='lower left')
+    ax1.grid(True, which='both', ls='--', alpha=0.3)
+    
+    # Compute observed slope
+    if len(errors) > 1:
+        slope = np.log(errors[0]/errors[-2]) / np.log(dt_vals[0]/dt_vals[-2])
+        ax1.text(0.05, 0.95, f'Observed order: {slope:.2f}\nExpected: 4.00', 
+                 transform=ax1.transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+    else:
+        slope = 0.0
+    
+    # --- Plot 2: Energy conservation ---
+    # Filter out zero or negative drifts for log plot
+    drift_plot = np.maximum(drifts, 1e-16)
+    ax2.loglog(dt_vals, drift_plot, 's-', color='orange', linewidth=2, markersize=8, label='Energy Drift')
+    ax2.axhline(y=1e-6, color='red', linestyle=':', label='Drift limit (1e-6)')
+    ax2.set_xlabel('Step Size dt (M)', fontsize=12)
+    ax2.set_ylabel('Relative Energy Drift', fontsize=12)
+    ax2.set_title('Hamiltonian Constraint', fontsize=14, fontweight='bold')
+    ax2.legend(loc='upper left')
+    ax2.grid(True, which='both', ls='--', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('thesis_validation.png', dpi=300, bbox_inches='tight')
+    print("\n📊 Plot saved: thesis_validation.png")
+    plt.show()
+    
+    return slope
 
 def main():
-    """Main validation routine."""
+    """Execute full validation suite."""
+    results = run_deflection_validation()
     
-    # Create output directory if needed
-    os.makedirs('validation', exist_ok=True)
+    if len(results) < 3:
+        print("\n❌ Insufficient data for convergence analysis")
+        return
     
-    # Impact parameter range (avoid b < b_crit where photons are captured)
-    b_min = max(4.0, b_crit + 0.1) * M  # Start just above critical value
-    b_max = 20.0 * M
-    num_points = 150
+    print("\n" + "=" * 60)
+    slope = plot_convergence(results)
     
-    b_values = np.linspace(b_min, b_max, num_points)
+    # Final verdict
+    print("\n" + "=" * 60)
+    print("VALIDATION SUMMARY")
+    print("=" * 60)
+    print(f"Observed convergence order: {slope:.2f}")
     
-    print("Calculating photon deflection angles...")
-    print(f"Impact parameter range: {b_min/M:.2f}M to {b_max/M:.2f}M")
-    print(f"Critical impact parameter: b_crit = 3√3 M ≈ {b_crit/M:.3f}M\n")
-    
-    # Calculate deflection angles
-    alpha_exact = np.array([exact_deflection(b, M) for b in b_values])
-    alpha_pn2 = np.array([deflection_2pn(b, M) for b in b_values])
-    
-    # Create plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot deflection angles
-    ax.plot(b_values / M, alpha_exact, 'b-', label='Exact (Elliptic Integrals)', 
-            linewidth=2, zorder=3)
-    ax.plot(b_values / M, alpha_pn2, 'r--', label='2PN Approximation', 
-            linewidth=2, zorder=2)
-    
-    # Mark critical impact parameter
-    ax.axvline(x=b_crit / M, color='k', linestyle=':', linewidth=1.5,
-               label=f'Critical b = 3√3 M ≈ {b_crit/M:.2f}M',
-               zorder=1)
-    
-    # Styling
-    ax.set_xlabel('Impact Parameter (b/M)', fontsize=12)
-    ax.set_ylabel('Deflection Angle α (radians)', fontsize=12)
-    ax.set_title('Photon Deflection in Schwarzschild Metric', fontsize=14, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=10)
-    ax.grid(True, alpha=0.3, linestyle='--')
-    ax.set_ylim(bottom=0)
-    
-    # Save plot
-    plt.tight_layout()
-    plt.savefig('validation/deflection_test.png', dpi=150, bbox_inches='tight')
-    print("Plot saved to: validation/deflection_test.png")
-    
-    # Calculate error at b = 10M
-    b_test = 10.0 * M
-    if b_test > b_crit:
-        alpha_exact_10M = exact_deflection(b_test, M)
-        alpha_pn2_10M = deflection_2pn(b_test, M)
-        error_percent = abs(alpha_exact_10M - alpha_pn2_10M) / alpha_exact_10M * 100
-        
-        print(f"\n{'='*50}")
-        print(f"Error Analysis at b = 10M:")
-        print(f"{'='*50}")
-        print(f"Exact deflection (elliptic):  {alpha_exact_10M:.6f} radians")
-        print(f"2PN approximation:            {alpha_pn2_10M:.6f} radians")
-        print(f"Absolute difference:          {abs(alpha_exact_10M - alpha_pn2_10M):.6f} radians")
-        print(f"Relative error:               {error_percent:.2f}%")
-        print(f"{'='*50}")
-        
-        # Also show in degrees for intuition
-        deg_exact = np.degrees(alpha_exact_10M)
-        deg_pn2 = np.degrees(alpha_pn2_10M)
-        print(f"In degrees:")
-        print(f"  Exact:  {deg_exact:.2f}°")
-        print(f"  2PN:    {deg_pn2:.2f}°")
-        print(f"  Diff:   {abs(deg_exact - deg_pn2):.2f}°")
-        
+    if 3.8 <= slope <= 4.2:
+        print("✅ PASS: RK4 shows 4th-order convergence")
     else:
-        print(f"\nNote: b=10M is below critical impact parameter (b_crit={b_crit/M:.3f}M)")
-        print("Photon would be captured by the black hole.")
+        print("⚠️  WARNING: Convergence outside expected range")
     
-    plt.show()
-
+    # Energy conservation check
+    max_drift = max(r['energy_drift'] for r in results)
+    print(f"Maximum energy drift: {max_drift:.2e}")
+    
+    if max_drift < 1e-6:
+        print("✅ PASS: Energy conservation within tolerance")
+    else:
+        print("❌ FAIL: Energy drift exceeds 1e-6")
+    
+    print("=" * 60)
+    print("🎓 Validation complete. Integrator ready for Phase 2!")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()

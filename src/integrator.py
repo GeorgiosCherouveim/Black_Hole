@@ -1,138 +1,123 @@
 #!/usr/bin/env python3
 """
-RK4 Geodesic Integrator for Schwarzschild Ray Tracing
-=====================================================
-
-Robust integration with adaptive step size and NaN handling.
+Schwarzschild Geodesic Integrator
+================================
+RK4 integration for null geodesics in Schwarzschild spacetime.
 """
 
 import numpy as np
 from schwarzschild import schwarzschild_geodesic_rhs
 
-def integrate_geodesic(initial_state, M, lambda_max=100.0, dt=0.01, r_escape=50.0):
+def create_initial_state(r0_vec, target_vec, M):
     """
-    Integrate photon geodesic with NaN-safe RK4.
+    Create initial state [x, y, z, px, py, pz] for photon ray.
     
-    Parameters
-    ----------
-    initial_state : ndarray (6,)
-        Initial [x, y, z, px, py, pz]
+    Parameters:
+    -----------
+    r0_vec : array (3,)
+        Initial spatial position [x0, y0, z0]
+    target_vec : array (3,)
+        Vector from r0 to target point
     M : float
         Black hole mass
-    lambda_max : float
-        Maximum affine time
-    dt : float
-        Initial step size
-    r_escape : float
-        Escape radius in units of M
     
-    Returns
-    -------
-    trajectory : ndarray (N, 6)
-        Photon path
-    status : dict
-        Integration status
+    Returns:
+    --------
+    state : array (6,)
+        [x, y, z, px, py, pz] where p_i are covariant momentum components
+    p0 : float
+        Time component of momentum (energy)
     """
-    state = initial_state.astype(float).copy()
-    trajectory = [state.copy()]
-    total_lambda = 0.0
-    
-    status = {'reason': 'unknown', 'final_r': np.nan, 'steps': 0}
-    
-    max_steps = int(lambda_max / dt) * 10  # Allow for step size variations
-    
-    for step in range(max_steps):
-        r = np.linalg.norm(state[:3])
-        status['final_r'] = r
-        status['steps'] = step
-        
-        # Termination conditions
-        if r < 2.01 * M:
-            status['reason'] = 'capture'
-            break
-        if r > r_escape * M:
-            status['reason'] = 'escape'
-            break
-        
-        # Compute derivatives
-        k1 = schwarzschild_geodesic_rhs(state, M)
-        
-        # NaN check
-        if np.any(np.isnan(k1)):
-            # Reduce step size and retry
-            dt *= 0.5
-            if dt < 1e-6:
-                status['reason'] = 'error'
-                status['error'] = 'dt too small'
-                break
-            continue
-        
-        # RK4 step
-        k2 = schwarzschild_geodesic_rhs(state + 0.5*dt*k1, M)
-        k3 = schwarzschild_geodesic_rhs(state + 0.5*dt*k2, M)
-        k4 = schwarzschild_geodesic_rhs(state + dt*k3, M)
-        
-        # Check for NaN in intermediate steps
-        if any(np.any(np.isnan(k)) for k in [k2, k3, k4]):
-            dt *= 0.5
-            continue
-        
-        # Update state
-        state += dt/6.0 * (k1 + 2*k2 + 2*k3 + k4)
-        
-        trajectory.append(state.copy())
-        total_lambda += dt
-        
-        # Adaptive step size: increase if safe
-        if step % 10 == 0 and np.max(np.abs(k1)) < 0.1:
-            dt = min(dt * 1.2, 0.5)  # Cap at 0.5
-    
-    return np.array(trajectory), status
-
-
-def create_initial_state(r0_vec, target_vec, M):
-    """Create physically consistent initial state."""
+    # Normalize spatial momentum direction
     p_spatial = target_vec / np.linalg.norm(target_vec)
-    r = np.linalg.norm(r0_vec)
+    r0 = np.linalg.norm(r0_vec)
+    
+    # Dot product r·p for Hamiltonian constraint
     xp = np.dot(r0_vec, p_spatial)
     
-    # Quadratic: A p_0^2 + B p_0 + C = 0
-    A = -1 + 2*M/r
-    B = 4*M*xp / r**2
-    C = 1 - 2*M*xp**2 / r**3  # |p|^2 = 1
+    # Solve -p₀² + pᵢpⁱ = 0 for null geodesic
+    # pᵢpⁱ = (1 + 2M/r) p_spatial² - (4M/r²) xp p₀ + (2M/r³) xp²
+    # For p_spatial² = 1 (normalized), this becomes quadratic in p₀
     
-    discriminant = B**2 - 4*A*C
+    A = -1.0
+    B = -4 * M * xp / r0**2
+    C = 1.0 + 2 * M / r0
+    
+    discriminant = B**2 - 4 * A * C
     
     if discriminant < 0:
-        raise ValueError(f"No real p_0 solution at r={r:.2f}M")
+        raise ValueError(f"No real solution for p₀ at r={r0:.2f}M (discriminant={discriminant:.2e})")
     
     sqrt_disc = np.sqrt(discriminant)
-    p0_root1 = (-B + sqrt_disc) / (2*A)
-    p0_root2 = (-B - sqrt_disc) / (2*A)
-    
-    # Choose incoming root (p_0 < 0)
-    p0 = p0_root1 if p0_root1 < 0 else p0_root2
+    # Choose incoming photon solution (p₀ > 0, but momentum points inward)
+    p0_root1 = (-B + sqrt_disc) / (2 * A)
+    p0_root2 = (-B - sqrt_disc) / (2 * A)
+    p0 = max(p0_root1, p0_root2)  # Take the positive root
     
     return np.array([*r0_vec, *p_spatial]), p0
 
-
-if __name__ == "__main__":
-    # Simple smoke test
-    import numpy as np
+def integrate_geodesic(initial_state, M, lambda_max=5000.0, dt=0.5, r_escape=500.0):
+    """
+    Integrate null geodesic using RK4 with fixed step size.
     
-    M = 1.0
+    Parameters:
+    -----------
+    initial_state : array (6,)
+        [x, y, z, px, py, pz]
+    M : float
+        Black hole mass
+    lambda_max : float
+        Maximum affine time to integrate
+    dt : float
+        Step size in affine time
+    r_escape : float
+        Termination radius (in units of M)
     
-    # Create state
-    r0 = np.array([20.0, 5.0, 0.0])
-    target = np.array([-1.0, -0.25, 0.0])
-    state0, p0 = create_initial_state(r0, target, M)
+    Returns:
+    --------
+    trajectory : array (N, 6)
+        State at each step
+    status : dict
+        {
+            'reason': 'escape' | 'capture' | 'max_steps',
+            'final_r': float,
+            'steps': int
+        }
+    """
+    state = np.array(initial_state, dtype=float, copy=True)
+    trajectory = [np.array(state, copy=True)]
     
-    print(f"Initial state: {state0}")
-    print(f"p_0 = {p0:.6f}")
+    n_steps = int(lambda_max / dt)
     
-    # Integrate
-    path, status = integrate_geodesic(state0, M, lambda_max=50.0, dt=0.1)
+    for step in range(n_steps):
+        r = np.linalg.norm(state[:3])
+        
+        # Termination conditions
+        if r < 2.01 * M:  # Inside horizon (with buffer)
+            return np.array(trajectory), {
+                'reason': 'capture',
+                'final_r': r,
+                'steps': step
+            }
+        if r > r_escape * M:  # Escaped to infinity
+            return np.array(trajectory), {
+                'reason': 'escape',
+                'final_r': r,
+                'steps': step
+            }
+        
+        # RK4 step
+        k1 = schwarzschild_geodesic_rhs(state, M)
+        k2 = schwarzschild_geodesic_rhs(state + 0.5 * dt * k1, M)
+        k3 = schwarzschild_geodesic_rhs(state + 0.5 * dt * k2, M)
+        k4 = schwarzschild_geodesic_rhs(state + dt * k3, M)
+        
+        state += dt / 6.0 * (k1 + 2*k2 + 2*k3 + k4)
+        trajectory.append(np.array(state, copy=True))
     
-    print(f"\nIntegration status: {status}")
-    print(f"Trajectory shape: {path.shape}")
-    print(f"Final radius: {status['final_r']:.3f}M")
+    # Reached lambda_max
+    return np.array(trajectory), {
+        'reason': 'max_steps',
+        'final_r': np.linalg.norm(state[:3]),
+        'steps': n_steps
+    }
