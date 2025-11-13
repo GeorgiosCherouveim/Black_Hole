@@ -91,3 +91,9 @@
 - Implement full ray tracer with observer camera
 - Add redshift calculation (frequency shift along geodesics)
 - Begin accretion disk emission models
+
+### Status (13/11/25)
+- Strong field test parameters for capture demonstration still W.I.P.
+- Null constraint has improved to machine accuracy
+- Convergence is still showing wrong results, unsure of the reason yet
+- Haven't applied any of the following Week 2 implementations
